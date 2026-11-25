@@ -435,5 +435,7 @@ def render():
 
 
 if __name__ == "__main__":
-    here = os.path.dirname(os.path.abspath(__file__))
-    write_png(render(), os.path.join(here, "entry.png"))
+    target_dir = os.environ.get("MAKEFUN_OUTPUT_DIR")
+    if not target_dir:
+        target_dir = "/output" if os.path.isdir("/output") else "."
+    write_png(render(), os.path.join(target_dir, "entry.png"))
