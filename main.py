@@ -1,31 +1,45 @@
-#!/usr/bin/env python3
-"""Deterministically generate entry.png: 25 November 2026 world news.
+"""Front-page generator for the make.fun bounty
+"Sum up 25 November's world news in one image" (news-image-20261125).
 
-Pure Python 3 standard library only. No network, no randomness, no clock.
-Text is drawn with a small 5x7 bitmap font defined below (ASCII only).
-39 stories: 6 fuller top stories + 33 compact one-line items in 7 regional
-sections. All items are from Reuters dated 25 Nov 2026 (see BUILD-REPORT.md).
-Run:  python3 main.py   -> writes entry.png to $MAKEFUN_OUTPUT_DIR when set,
-else to /output when that directory exists, else to the working folder.
-The image bytes are identical wherever they are written.
+Draws a 1024x1024 newspaper front page holding 39 Reuters stories first
+reported on 25 November 2026: one lead story, five shorter top-story
+briefs, and 33 one-line items grouped into seven regional sections.
+
+Pure Python 3 standard library. The PNG is encoded by hand (zlib + CRC
+chunks) and text is rendered with a small 5x7 bitmap font defined below,
+so the output is byte-for-byte reproducible: no clocks, no randomness,
+no locale or environment input reaches the image.
 """
+
+import binascii
 import os
 import struct
 import zlib
 
-W = 1024
-H = 1024
+# --------------------------------------------------------------------------
+# Canvas geometry and palette
+# --------------------------------------------------------------------------
 
-PAPER = (247, 243, 232)
-INK = (22, 22, 22)
-GREY = (90, 90, 90)
-WHITE = (255, 255, 255)
-RED = (176, 32, 40)
-DARK = (45, 45, 45)
+PAGE_W = 1024
+PAGE_H = 1024
+MARGIN = 34                        # left/right page margin
+CONTENT_W = PAGE_W - 2 * MARGIN    # 956
+COLUMN_W = 468
+GUTTER = CONTENT_W - 2 * COLUMN_W  # 20
 
-# ---------------------------------------------------------------- font (5x7)
-# Each glyph: 7 strings of 5 chars, '#' = on. (Same font as v1, our own code.)
-FONT = {
+PAPER = (247, 244, 236)
+INK = (28, 28, 30)
+ACCENT = (150, 32, 32)
+FAINT = (112, 109, 100)
+
+# --------------------------------------------------------------------------
+# 5x7 bitmap font. Each glyph is seven rows of five characters; '#'
+# marks a set pixel. The advance width is six cells (one blank column of
+# letterspacing) times the draw scale. Uppercase letters, digits and
+# punctuation are defined here; lowercase letters follow in an update.
+# --------------------------------------------------------------------------
+
+GLYPHS = {
     "A": (".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
     "B": ("####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."),
     "C": (".####", "#....", "#....", "#....", "#....", "#....", ".####"),
@@ -34,7 +48,7 @@ FONT = {
     "F": ("#####", "#....", "#....", "####.", "#....", "#....", "#...."),
     "G": (".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."),
     "H": ("#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
-    "I": ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"),
+    "I": (".###.", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."),
     "J": ("..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."),
     "K": ("#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"),
     "L": ("#....", "#....", "#....", "#....", "#....", "#....", "#####"),
@@ -52,306 +66,374 @@ FONT = {
     "X": ("#...#", ".#.#.", "..#..", "..#..", "..#..", ".#.#.", "#...#"),
     "Y": ("#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."),
     "Z": ("#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"),
-    "0": (".###.", "#..##", "#.#.#", "#.#.#", "##..#", "#...#", ".###."),
-    "1": ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", "#####"),
+    "0": (".###.", "#..##", "#.#.#", "##..#", "#...#", "#...#", ".###."),
+    "1": ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."),
     "2": (".###.", "#...#", "....#", "..##.", ".#...", "#....", "#####"),
-    "3": ("####.", "....#", "....#", ".###.", "....#", "....#", "####."),
+    "3": ("#####", "...#.", "..#..", "...#.", "....#", "#...#", ".###."),
     "4": ("...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."),
     "5": ("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
-    "6": (".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."),
-    "7": ("#####", "....#", "...#.", "..#..", "..#..", "..#..", "..#.."),
+    "6": ("..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."),
+    "7": ("#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."),
     "8": (".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
-    "9": (".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."),
+    "9": (".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."),
     " ": (".....", ".....", ".....", ".....", ".....", ".....", "....."),
     ".": (".....", ".....", ".....", ".....", ".....", ".##..", ".##.."),
     ",": (".....", ".....", ".....", ".....", ".##..", ".##..", ".#..."),
-    "'": (".##..", ".##..", ".#...", ".....", ".....", ".....", "....."),
-    "-": (".....", ".....", ".....", "#####", ".....", ".....", "....."),
     ":": (".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."),
-    "$": (".####", "#.#..", "#.#..", ".###.", "..#.#", "..#.#", "####."),
-    "%": ("##..#", "##.#.", "....#", "...#.", "..#..", ".#...", "#..##"),
-    "+": (".....", "..#..", "..#..", ".###.", "..#..", "..#..", "....."),
+    ";": (".....", ".##..", ".##..", ".....", ".##..", ".##..", ".#..."),
+    "'": ("..#..", "..#..", ".#...", ".....", ".....", ".....", "....."),
+    '"': (".#.#.", ".#.#.", ".#.#.", ".....", ".....", ".....", "....."),
+    "!": ("..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."),
+    "?": (".###.", "#...#", "....#", "..##.", "..#..", ".....", "..#.."),
+    "-": (".....", ".....", ".....", "#####", ".....", ".....", "....."),
+    "(": ("...#.", "..#..", ".#...", ".#...", ".#...", "..#..", "...#."),
+    ")": (".#...", "..#..", "...#.", "...#.", "...#.", "..#..", ".#..."),
+    "%": ("##..#", "##.#.", "...#.", "..#..", ".#...", ".#.##", "#..##"),
+    "$": ("..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."),
+    "&": (".#...", "#.#..", "#.#..", ".#...", "#.#.#", "#..#.", ".##.#"),
     "/": ("....#", "....#", "...#.", "..#..", ".#...", "#....", "#...."),
+    "+": (".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."),
+    "=": (".....", ".....", "#####", ".....", "#####", ".....", "....."),
 }
 
-# ---------------------------------------------------------------- canvas
-buf = bytearray(W * H * 3)
+GLYPHS.update({
+    "a": (".....", ".....", ".###.", "....#", ".####", "#...#", ".####"),
+    "b": ("#....", "#....", "####.", "#...#", "#...#", "#...#", "####."),
+    "c": (".....", ".....", ".####", "#....", "#....", "#....", ".####"),
+    "d": ("....#", "....#", ".####", "#...#", "#...#", "#...#", ".####"),
+    "e": (".....", ".....", ".###.", "#...#", "#####", "#....", ".###."),
+    "f": ("..##.", ".#...", ".#...", "####.", ".#...", ".#...", ".#..."),
+    "g": (".....", ".####", "#...#", "#...#", ".####", "....#", ".###."),
+    "h": ("#....", "#....", "####.", "#...#", "#...#", "#...#", "#...#"),
+    "i": ("..#..", ".....", ".##..", "..#..", "..#..", "..#..", ".###."),
+    "j": ("...#.", ".....", "..##.", "...#.", "...#.", "...#.", ".##.."),
+    "k": ("#....", "#....", "#..#.", "#.#..", "##...", "#.#..", "#..#."),
+    "l": (".##..", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."),
+    "m": (".....", ".....", "##.#.", "#.#.#", "#.#.#", "#.#.#", "#.#.#"),
+    "n": (".....", ".....", "####.", "#...#", "#...#", "#...#", "#...#"),
+    "o": (".....", ".....", ".###.", "#...#", "#...#", "#...#", ".###."),
+    "p": (".....", ".....", "####.", "#...#", "####.", "#....", "#...."),
+    "q": (".....", ".....", ".####", "#...#", ".####", "....#", "....#"),
+    "r": (".....", ".....", "#.##.", "##..#", "#....", "#....", "#...."),
+    "s": (".....", ".....", ".####", "#....", ".###.", "....#", "####."),
+    "t": (".#...", ".#...", "####.", ".#...", ".#...", ".#...", "..##."),
+    "u": (".....", ".....", "#...#", "#...#", "#...#", "#..##", ".##.#"),
+    "v": (".....", ".....", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
+    "w": (".....", ".....", "#...#", "#.#.#", "#.#.#", "#.#.#", ".#.#."),
+    "x": (".....", ".....", "#...#", ".#.#.", "..#..", ".#.#.", "#...#"),
+    "y": (".....", ".....", "#...#", "#...#", ".####", "....#", ".###."),
+    "z": (".....", ".....", "#####", "...#.", "..#..", ".#...", "#####"),
+})
+
+# Typographic characters folded onto glyphs the font actually has.
+_REPLACEMENTS = {
+    "\u2014": "-", "\u2013": "-", "\u2212": "-",
+    "\u2018": "'", "\u2019": "'",
+    "\u201c": '"', "\u201d": '"',
+    "\u00d7": "x", "\u2022": "-", "\u2026": "...",
+}
 
 
-def fill_rect(x, y, w, h, color):
-    r, g, b = color
-    x0 = max(0, x)
-    y0 = max(0, y)
-    x1 = min(W, x + w)
-    y1 = min(H, y + h)
-    for yy in range(y0, y1):
-        base = (yy * W + x0) * 3
-        for xx in range(x0, x1):
-            i = base + (xx - x0) * 3
-            buf[i] = r
-            buf[i + 1] = g
-            buf[i + 2] = b
+def sanitize(text):
+    """Map text onto characters the bitmap font can draw."""
+    out = []
+    for ch in text:
+        if ch in _REPLACEMENTS:
+            out.append(_REPLACEMENTS[ch])
+        elif ch in GLYPHS:
+            out.append(ch)
+        else:
+            out.append(" ")
+    return "".join(out)
 
 
 def text_width(text, scale):
-    return len(text) * 6 * scale - scale if text else 0
+    """Pixel width of a string at the given scale (no trailing space)."""
+    if not text:
+        return 0
+    return len(text) * 6 * scale - scale
 
 
-def draw_text(x, y, text, scale, color):
-    for ch in text:
-        glyph = FONT[ch]
-        for row in range(7):
-            line = glyph[row]
-            for col in range(5):
-                if line[col] == "#":
-                    fill_rect(x + col * scale, y + row * scale, scale, scale, color)
-        x += 6 * scale
-    return x
-
-
-def draw_text_bold1(x, y, text, color):
-    """Scale-1 text with a 1px horizontal double-strike for legibility."""
-    for ch in text:
-        glyph = FONT[ch]
-        for row in range(7):
-            line = glyph[row]
-            for col in range(5):
-                if line[col] == "#":
-                    fill_rect(x + col, y + row, 2, 1, color)
-        x += 6
-    return x
-
-
-def draw_centered(cx, y, text, scale, color):
-    draw_text(cx - text_width(text, scale) // 2, y, text, scale, color)
-
-
-def wrap(text, max_chars):
+def wrap_text(text, scale, max_width, max_lines=None):
+    """Greedy word wrap; overlong words are hard-split. When max_lines
+    is given, extra lines are dropped and the last kept line is trimmed
+    to end with an ellipsis."""
+    per_line = max(1, (max_width + scale) // (6 * scale))
     lines = []
-    cur = ""
-    for word in text.split(" "):
-        trial = word if not cur else cur + " " + word
-        if len(trial) <= max_chars:
-            cur = trial
+    current = ""
+    for word in sanitize(text).split():
+        while len(word) > per_line:
+            if current:
+                lines.append(current)
+                current = ""
+            lines.append(word[:per_line])
+            word = word[per_line:]
+        trial = word if not current else current + " " + word
+        if text_width(trial, scale) <= max_width:
+            current = trial
         else:
-            lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    if max_lines is not None and len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while last and text_width(last + "...", scale) > max_width:
+            last = last[:-1].rstrip()
+        lines[-1] = last + "..."
     return lines
 
 
-# ---------------------------------------------------------------- content
-# Top stories: the six verified Reuters items of 25 Nov 2026 (see BUILD-REPORT.md).
-TOP = [
-    (
-        "ASIA - MARKETS", (176, 32, 40),
-        "ASIAN STOCKS TUMBLE ON FRESH US TARIFF THREATS",
-        "MSCI ASIA EX-JAPAN FELL 2.3 PCT, KOREA DOWN 5.3 PCT, TAIWAN 5.1 PCT, "
-        "NIKKEI 2.9 PCT.",
-    ),
-    (
-        "TECH - MARKETS", (23, 64, 140),
-        "SOFTBANK SLUMPS 13.8 PCT AS CHIP STOCKS CRATER",
-        "ADVANTEST FELL 12.7 PCT AND TOKYO ELECTRON 11.8 PCT, SAMSUNG AND SK "
-        "HYNIX DOWN OVER 7 PCT.",
-    ),
-    (
-        "ENERGY - MARKETS", (0, 105, 105),
-        "OIL FALLS AS GLUT FEARS OUTWEIGH HORMUZ RISKS",
-        "BRENT FELL 0.5 PCT TO $90.97 AND WTI 0.6 PCT TO $81.58, DESPITE THREE "
-        "SHIPS HIT NEAR HORMUZ.",
-    ),
-    (
-        "US - MARKETS", (96, 48, 140),
-        "DOW TOPS 50,000 FOR THE FIRST TIME",
-        "THE BLUE-CHIP INDEX CLOSED ABOVE 50,000 ON TUESDAY, A FIRST, AS US "
-        "STOCKS HELD UP.",
-    ),
-    (
-        "US - EARNINGS", (150, 100, 20),
-        "DELL POSTS RECORD QUARTER, LIFTS FY2027 OUTLOOK",
-        "DELL RAISED ITS FY2027 REVENUE OUTLOOK TO $202 BLN, SHARES ROSE 4.1 "
-        "PCT AFTER HOURS.",
-    ),
-    (
-        "ASIA - CRYPTO", (30, 115, 60),
-        "SOUTH KOREA DRAFTS STABLECOIN RULES FOR BANKS",
-        "SEOUL UNVEILED DRAFT RULES LETTING BANKS ISSUE WON-BACKED "
-        "STABLECOINS, A FIRST IN ASIA.",
-    ),
-]
+class Canvas:
+    """An RGB pixel buffer with rectangle fills and bitmap text."""
 
-# Compact one-line items by region. All Reuters, 25 Nov 2026 (see BUILD-REPORT.md).
-SECTIONS = [
-    ("ASIA-PACIFIC", (0, 105, 105), [
-        "MALAYSIA AVIATION GROUP BUYS 10 BOEING 787S",
-        "AUSTRALIA, SOLOMON ISLANDS SIGN SECURITY PACT",
-        "MYANMAR LANDMINE TOLL HIGHEST FOR 3RD YEAR",
-        "AUSTRALIA CPI HOTTER THAN EXPECTED",
-        "JAPAN 40-YEAR BOND AUCTION DRAWS WEAK DEMAND",
-        "CHINA, INDIA SET FOR RECORD RUSSIAN OIL IMPORTS",
-        "JAPAN TRADE MINISTER HEADS TO WASHINGTON",
-    ]),
-    ("UNITED STATES", (23, 64, 140), [
-        "US PCE INFLATION DUE TODAY, CORE SEEN UP 0.3 PCT",
-        "US Q3 GDP SECOND ESTIMATE DUE TODAY",
-        "US JOBLESS CLAIMS DUE TODAY",
-        "FED'S BEIGE BOOK DUE TODAY",
-        "DEERE EARNINGS DUE BEFORE THE BELL",
-        "TRUMP AWARDS GIULIANI MEDAL OF FREEDOM",
-        "TRUMP PARDONS TURKEYS FREEDOM AND FEATHERS",
-        "TRUMP HEADS TO MAR-A-LAGO FOR THANKSGIVING",
-        "ABREGO GARCIA TO LEAVE US VOLUNTARILY",
-        "HOUSE DEMOCRATS ALARM AT FAA AI TOOL",
-    ]),
-    ("EUROPE", (96, 48, 140), [
-        "GERMAN Q3 GDP DUE TODAY",
-        "FRENCH CONSUMER CONFIDENCE DUE TODAY",
-        "EUROPEAN SHARES SET TO OPEN LOWER",
-        "DRONE STRIKES REPORTED AT TWO RUSSIAN REFINERIES",
-    ]),
-    ("MARKETS AND ENERGY", (70, 70, 70), [
-        "NVIDIA SLIDES 5.9 PCT AS AI FEARS SPREAD",
-        "ANTHROPIC SHARES 6.5 PCT BELOW IPO PRICE",
-        "BITCOIN SLIPS TO $59,258, ETHER TO $1,661",
-        "OPEC+ MEETS NOV 29 TO SET 2027 OUTPUT POLICY",
-        "IRAQ PRESSES OPEC+ TO LIFT CAPACITY ESTIMATE",
-        "US FUTURES SLIP AS TARIFF FEARS WEIGH",
-    ]),
-    ("MIDDLE EAST AND AFRICA", (150, 100, 20), [
-        "LIBYA'S SHARARA OIL PIPELINE REOPENS",
-        "THREE VESSELS STRUCK NEAR STRAIT OF HORMUZ",
-    ]),
-    ("LATIN AMERICA", (176, 32, 40), [
-        "SENATE PROBES VANCE ROLE IN VITOL VENEZUELA DEAL",
-    ]),
-    ("GLOBAL - SPORT", (30, 115, 60), [
-        "GUKESH HOLDS SINDAROV IN GAME 1 DRAW AT WORLD CHESS",
-        "CZECHIA REACH DAVIS CUP SEMIS, 2-0 VS CANADA",
-        "DAVIS CUP: ITALY FACE SOUTH KOREA IN QUARTERS",
-    ]),
-]
+    def __init__(self, width, height, background):
+        self.width = width
+        self.height = height
+        self.pixels = bytearray(background * (width * height))
 
-LEFT = 24
-RIGHT = W - 24
-COLW = (RIGHT - LEFT - 16) // 2  # compact column width
+    def fill_rect(self, x, y, w, h, color):
+        x0 = max(0, x)
+        y0 = max(0, y)
+        x1 = min(self.width, x + w)
+        y1 = min(self.height, y + h)
+        if x1 <= x0 or y1 <= y0:
+            return
+        row = bytes(color) * (x1 - x0)
+        for yy in range(y0, y1):
+            start = (yy * self.width + x0) * 3
+            self.pixels[start:start + len(row)] = row
+
+    def draw_text(self, x, y, text, scale, color):
+        cursor = x
+        for ch in text:
+            glyph = GLYPHS.get(ch, GLYPHS[" "])
+            for row_i, row in enumerate(glyph):
+                for col_i, cell in enumerate(row):
+                    if cell == "#":
+                        self.fill_rect(cursor + col_i * scale,
+                                       y + row_i * scale,
+                                       scale, scale, color)
+            cursor += 6 * scale
+        return cursor - x
 
 
-def check_content():
-    texts = ["THE WORLD IN ONE IMAGE", "25 NOVEMBER 2026",
-             "WEDNESDAY - 39 STORIES FROM AROUND THE GLOBE", "TOP STORIES",
-             "ALL ITEMS FROM REUTERS, 25 NOV 2026"]
-    for tag, _c, head, body in TOP:
-        texts += [tag, head, body]
-        if len(wrap(head, 38)) > 2:
-            raise ValueError("top headline too long: " + head)
-        if len(wrap(body, 76)) > 3:
-            raise ValueError("top body too long: " + head)
-    for name, _c, items in SECTIONS:
-        texts.append(name)
-        for it in items:
-            texts.append(it)
-            if text_width(it, 1) > COLW - 14:
-                raise ValueError("compact item too wide: " + it)
-    for t in texts:
-        for ch in t:
-            if ch not in FONT:
-                raise ValueError("missing glyph: %r" % ch)
+def _png_chunk(tag, payload):
+    crc = binascii.crc32(tag + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", crc)
 
 
-def main():
-    check_content()
-    fill_rect(0, 0, W, H, PAPER)
-
-    # outer frame
-    fill_rect(10, 10, W - 20, 4, INK)
-    fill_rect(10, H - 14, W - 20, 4, INK)
-    fill_rect(10, 10, 4, H - 20, INK)
-    fill_rect(W - 14, 10, 4, H - 20, INK)
-
-    # masthead
-    draw_centered(W // 2, 24, "THE WORLD IN ONE IMAGE", 4, INK)
-    fill_rect(40, 60, W - 80, 3, INK)
-    draw_centered(W // 2, 72, "25 NOVEMBER 2026", 7, RED)
-    draw_centered(W // 2, 132, "WEDNESDAY - 39 STORIES FROM AROUND THE GLOBE", 2, GREY)
-    fill_rect(40, 154, W - 80, 5, INK)
-
-    # ---- top stories ----
-    y = 166
-    fill_rect(LEFT, y, RIGHT - LEFT, 20, INK)
-    draw_text(LEFT + 10, y + 3, "TOP STORIES", 2, WHITE)
-    y += 28
-    gap = 10
-    cell_w = (RIGHT - LEFT - gap) // 2
-    cell_h = 80
-    for idx, (tag, color, head, body) in enumerate(TOP):
-        cx = LEFT + (idx % 2) * (cell_w + gap)
-        cy = y + (idx // 2) * (cell_h + 8)
-        fill_rect(cx, cy, cell_w, cell_h, WHITE)
-        fill_rect(cx, cy, cell_w, 2, INK)
-        fill_rect(cx, cy + cell_h - 2, cell_w, 2, INK)
-        fill_rect(cx, cy, 2, cell_h, INK)
-        fill_rect(cx + cell_w - 2, cy, 2, cell_h, INK)
-        fill_rect(cx + 2, cy + 2, cell_w - 4, 15, color)
-        draw_text(cx + 10, cy + 6, tag, 1, WHITE)
-        yy = cy + 22
-        for line in wrap(head, 38):
-            draw_text(cx + 10, yy, line, 2, INK)
-            yy += 16
-        yy += 2
-        for line in wrap(body, 76):
-            draw_text(cx + 10, yy, line, 1, DARK)
-            yy += 9
-    y += 3 * cell_h + 2 * 8 + 10
-
-    # ---- compact regional sections ----
-    for name, color, items in SECTIONS:
-        fill_rect(LEFT, y, RIGHT - LEFT, 20, color)
-        draw_text(LEFT + 10, y + 3, name, 2, WHITE)
-        y += 26
-        rows = (len(items) + 1) // 2
-        for r in range(rows):
-            for c in range(2):
-                i = r * 2 + c
-                if i >= len(items):
-                    break
-                ix = LEFT + c * (COLW + 16)
-                fill_rect(ix + 1, y + 2, 4, 4, color)
-                draw_text_bold1(ix + 12, y, items[i], INK)
-            y += 13
-        y += 8
-
-    # footer
-    fill_rect(40, y + 2, W - 80, 3, INK)
-    draw_centered(W // 2, y + 12, "ALL ITEMS FROM REUTERS, 25 NOV 2026", 2, GREY)
-    if y + 30 > H - 20:
-        raise ValueError("layout overflow: footer at %d" % y)
-
-    # ---- encode PNG (filter 0 per scanline, zlib) ----
+def write_png(canvas, path):
+    """Encode the canvas as a deterministic RGB PNG (filter 0 rows,
+    fixed compression level, no ancillary chunks)."""
     raw = bytearray()
-    row_bytes = W * 3
-    for yy in range(H):
+    stride = canvas.width * 3
+    for y in range(canvas.height):
         raw.append(0)
-        raw += buf[yy * row_bytes:(yy + 1) * row_bytes]
+        raw += canvas.pixels[y * stride:(y + 1) * stride]
+    ihdr = struct.pack(">IIBBBBB", canvas.width, canvas.height, 8, 2, 0, 0, 0)
+    data = (b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", ihdr)
+            + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+            + _png_chunk(b"IEND", b""))
+    with open(path, "wb") as fh:
+        fh.write(data)
 
-    def chunk(tag, data):
-        out = struct.pack(">I", len(data)) + tag + data
-        out += struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-        return out
+# --------------------------------------------------------------------------
+# Story data: 39 Reuters items first reported on 25 November 2026.
+# --------------------------------------------------------------------------
 
-    png = bytearray()
-    png += b"\x89PNG\r\n\x1a\n"
-    png += chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
-    png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
-    png += chunk(b"IEND", b"")
+LEAD = (
+    "Asian stocks tumble on fresh US tariff threats",
+    "MSCI Asia ex-Japan -2.3%; Korea -5.3%, Taiwan -5.1%, Nikkei -2.9%",
+)
 
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or (
-        "/output" if os.path.isdir("/output") else "."
-    )
-    with open(os.path.join(out_dir, "entry.png"), "wb") as f:
-        f.write(png)
+BRIEFS = [
+    ("SoftBank slumps 13.8% as chip stocks crater",
+     "Advantest -12.7%, Tokyo Electron -11.8%; Samsung, SK Hynix -7%+"),
+    ("Oil falls as glut fears outweigh Hormuz risks",
+     "Brent $90.97 (-0.5%), WTI $81.58 (-0.6%)"),
+    ("Dow tops 50,000 for the first time", ""),
+    ("Dell posts record quarter, lifts FY2027 outlook to $202bn",
+     "shares +4.1% after hours"),
+    ("South Korea drafts stablecoin rules for banks", ""),
+]
+
+SECTIONS = [
+    ("Asia-Pacific", [
+        "Malaysia Aviation Group buys 10 Boeing 787 Dreamliners",
+        "Australia and Solomon Islands sign security pact",
+        "Myanmar landmine casualties highest for third straight year - 1,891 killed or injured in 2025",
+        "Australia CPI hotter than expected",
+        "Japan's 40-year bond auction draws weak demand",
+        "China and India on track for record Russian oil imports",
+        "Japan's trade minister heads to Washington over tariffs",
+    ]),
+    ("United States", [
+        "US PCE inflation due today, core seen up 0.3% on month",
+        "US Q3 GDP second estimate due today",
+        "US jobless claims due today",
+        "Fed's Beige Book due today",
+        "Deere earnings due before the bell",
+        "Trump awards Giuliani Medal of Freedom",
+        'Trump pardons turkeys "Freedom" and "Feathers"',
+        "Trump heads to Mar-a-Lago for Thanksgiving",
+        "Abrego Garcia to leave US voluntarily",
+        "House Democrats alarm at FAA AI tool deployment",
+    ]),
+    ("Europe", [
+        "German Q3 GDP due today",
+        "French consumer confidence due today",
+        "European shares set to open lower as tech selloff spreads",
+        "Drone strikes reported at two Russian oil refineries (Syzran, Kuibyshev, Samara region)",
+    ]),
+    ("Markets and Energy", [
+        "Nvidia slides 5.9% as AI fears spread",
+        "Anthropic shares 6.5% below IPO price",
+        "Bitcoin slips to $59,258, ether to $1,661",
+        "OPEC+ meets Nov 29 to set 2027 output policy",
+        "Iraq presses OPEC+ to lift capacity estimate",
+        "US futures slip as tariff fears weigh",
+    ]),
+    ("Middle East and Africa", [
+        "Libya's Sharara oil pipeline reopens",
+        "Three vessels struck near Strait of Hormuz on Monday (UKMTO)",
+    ]),
+    ("Latin America", [
+        "Senate probes Vance role in Vitol Venezuela oil deal",
+    ]),
+    ("Global - Sport", [
+        "Gukesh holds Sindarov in Game 1 draw at World Chess Championship - 38 moves",
+        "Czechia reach Davis Cup semi-finals, 2-0 vs Canada - first since 2014",
+        "Davis Cup: Italy face South Korea in quarter-finals today",
+    ]),
+]
+
+# --------------------------------------------------------------------------
+# Page layout
+# --------------------------------------------------------------------------
+
+LEFT_X = MARGIN
+RIGHT_X = MARGIN + COLUMN_W + GUTTER
+ITEM_INDENT = 10
+FOOTER_RULE_Y = 966
+
+
+def _centered_x(text, scale):
+    return (PAGE_W - text_width(sanitize(text), scale)) // 2
+
+
+def _rule(canvas, y, color=INK, height=1):
+    canvas.fill_rect(MARGIN, y, CONTENT_W, height, color)
+
+
+def draw_masthead(canvas):
+    title = "THE WORLD LEDGER"
+    canvas.draw_text(_centered_x(title, 7), 28, title, 7, INK)
+    _rule(canvas, 90, ACCENT, 3)
+    _rule(canvas, 97, INK, 1)
+    dateline = "WEDNESDAY, 25 NOVEMBER 2026 - 39 STORIES"
+    canvas.draw_text(_centered_x(dateline, 2), 106, dateline, 2, INK)
+    _rule(canvas, 128, INK, 1)
+    return 140
+
+
+def draw_lead(canvas, y):
+    canvas.draw_text(MARGIN, y, "TOP STORY", 1, ACCENT)
+    y += 12
+    headline, summary = LEAD
+    for line in wrap_text(headline, 3, CONTENT_W, max_lines=2):
+        canvas.draw_text(MARGIN, y, line, 3, INK)
+        y += 26
+    for line in wrap_text(summary, 2, CONTENT_W, max_lines=3):
+        canvas.draw_text(MARGIN, y, line, 2, INK)
+        y += 19
+    return y + 8
+
+
+def _draw_brief(canvas, x, y, headline, summary):
+    for line in wrap_text(headline, 2, COLUMN_W, max_lines=2):
+        canvas.draw_text(x, y, line, 2, INK)
+        y += 18
+    if summary:
+        for line in wrap_text(summary, 1, COLUMN_W, max_lines=4):
+            canvas.draw_text(x, y, line, 1, INK)
+            y += 11
+    return y + 14
+
+
+def draw_briefs(canvas, y):
+    canvas.draw_text(MARGIN, y, "MORE TOP STORIES", 1, ACCENT)
+    y += 14
+    left_y = y
+    for headline, summary in BRIEFS[:3]:
+        left_y = _draw_brief(canvas, LEFT_X, left_y, headline, summary)
+    right_y = y
+    for headline, summary in BRIEFS[3:]:
+        right_y = _draw_brief(canvas, RIGHT_X, right_y, headline, summary)
+    return max(left_y, right_y)
+
+
+def _item_lines(item):
+    return wrap_text(item, 1, COLUMN_W - ITEM_INDENT, max_lines=3)
+
+
+def _section_height(items):
+    height = 26
+    for item in items:
+        height += len(_item_lines(item)) * 12 + 4
+    return height + 10
+
+
+def _draw_section(canvas, x, y, name, items):
+    canvas.draw_text(x, y, sanitize(name).upper(), 2, ACCENT)
+    canvas.fill_rect(x, y + 17, COLUMN_W, 1, INK)
+    y += 26
+    for item in items:
+        canvas.fill_rect(x, y + 2, 3, 3, ACCENT)
+        for line in _item_lines(item):
+            canvas.draw_text(x + ITEM_INDENT, y, line, 1, INK)
+            y += 12
+        y += 4
+    return y + 10
+
+
+def draw_sections(canvas, y):
+    heights = [_section_height(items) for _, items in SECTIONS]
+    half = sum(heights) / 2
+    split = 0
+    running = 0
+    while split < len(SECTIONS) and (split == 0 or running + heights[split] <= half):
+        running += heights[split]
+        split += 1
+    left_y = y
+    for name, items in SECTIONS[:split]:
+        left_y = _draw_section(canvas, LEFT_X, left_y, name, items)
+    right_y = y
+    for name, items in SECTIONS[split:]:
+        right_y = _draw_section(canvas, RIGHT_X, right_y, name, items)
+    return max(left_y, right_y)
+
+
+def draw_footer(canvas):
+    _rule(canvas, FOOTER_RULE_Y, INK, 1)
+    text = "ALL ITEMS FROM REUTERS, 25 NOV 2026"
+    canvas.draw_text(_centered_x(text, 1), FOOTER_RULE_Y + 8, text, 1, FAINT)
+
+
+def render():
+    canvas = Canvas(PAGE_W, PAGE_H, PAPER)
+    y = draw_masthead(canvas)
+    y = draw_lead(canvas, y)
+    _rule(canvas, y, INK, 1)
+    y = draw_briefs(canvas, y + 10)
+    _rule(canvas, y, INK, 1)
+    draw_sections(canvas, y + 10)
+    draw_footer(canvas)
+    return canvas
 
 
 if __name__ == "__main__":
-    main()
+    here = os.path.dirname(os.path.abspath(__file__))
+    write_png(render(), os.path.join(here, "entry.png"))
